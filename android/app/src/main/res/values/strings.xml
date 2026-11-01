@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">DXR Books</string>
+    <string name="title_activity_main">DXR Books</string>
+    <string name="package_name">com.dxr.books</string>
+    <string name="custom_url_scheme">com.dxr.books</string>
+</resources>

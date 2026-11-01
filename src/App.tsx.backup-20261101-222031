@@ -1,0 +1,1170 @@
+import { useState, useRef } from 'react'
+import { useEditor, EditorContent } from '@tiptap/react'
+import StarterKit from '@tiptap/starter-kit'
+import Underline from '@tiptap/extension-underline'
+import TextAlign from '@tiptap/extension-text-align'
+import { Extension } from '@tiptap/core'
+import { TextStyle } from '@tiptap/extension-text-style'
+import FontFamily from '@tiptap/extension-font-family'
+import Color from '@tiptap/extension-color'
+import Highlight from '@tiptap/extension-highlight'
+import {
+  BookOpen, Library, Plus, Users, FileText,
+  ChevronLeft, LockKeyhole, PenTool, FileDown,
+  Clock, X, BookPlus, Search, ArrowRight,
+  FolderOpen, Bold, Italic, Underline as UnderlineIcon,
+  Strikethrough, Highlighter, Heading1, Heading2,
+  Heading3, Pilcrow, AlignRight, AlignCenter, AlignLeft,
+  Undo2, Redo2, RemoveFormatting, List, ListOrdered,
+  Quote, Code2, Minus, Pencil, ArrowUpRight, Eraser, Trash2, type LucideIcon
+} from 'lucide-react'
+import './App.css'
+
+type Book = {
+  id: string
+  title: string
+  password: string
+  updated: string
+  owner: boolean
+  content?: string
+}
+
+type Page = 'home' | 'my-book' | 'shared' | 'library' | 'editor'
+
+const initialBooks: Book[] = JSON.parse(
+  localStorage.getItem('dxr-books') || '[]'
+)
+
+
+
+
+const FontSize = Extension.create({
+  name: 'fontSize',
+
+  addGlobalAttributes() {
+    return [
+      {
+        types: ['textStyle'],
+        attributes: {
+          fontSize: {
+            default: null,
+            parseHTML: element => element.style.fontSize || null,
+            renderHTML: attributes => {
+              if (!attributes.fontSize) return {}
+              return { style: `font-size: ${attributes.fontSize}` }
+            }
+          }
+        }
+      }
+    ]
+  }
+})
+
+
+type DrawPoint = { x: number; y: number }
+type DrawStroke = {
+  id: number
+  type: 'pen' | 'arrow'
+  points: DrawPoint[]
+  color: string
+  width: number
+}
+
+function DrawingLayer({ bookId }: { bookId: string }) {
+  const storageKey = `dxr-book-drawings:${bookId}`
+  const noteStorageKey = `dxr-arrow-notes:${bookId}`
+
+  const [enabled, setEnabled] = useState(false)
+  const [tool, setTool] = useState<'pen' | 'arrow'>('pen')
+  const [color, setColor] = useState('#c62828')
+
+  const [strokes, setStrokes] = useState<DrawStroke[]>(() => {
+    try {
+      return JSON.parse(localStorage.getItem(storageKey) || '[]')
+    } catch {
+      return []
+    }
+  })
+
+  const [notes, setNotes] = useState<Record<number, string>>(() => {
+    try {
+      return JSON.parse(localStorage.getItem(noteStorageKey) || '{}')
+    } catch {
+      return {}
+    }
+  })
+
+  const [editingId, setEditingId] = useState<number | null>(null)
+  const [draft, setDraft] = useState<DrawStroke | null>(null)
+  const drawing = useRef(false)
+  const nextId = useRef(Date.now())
+
+  function save(next: DrawStroke[]) {
+    setStrokes(next)
+    localStorage.setItem(storageKey, JSON.stringify(next))
+  }
+
+  function updateNote(id: number, text: string) {
+    const next = { ...notes, [id]: text }
+    setNotes(next)
+    localStorage.setItem(noteStorageKey, JSON.stringify(next))
+  }
+
+  function pointFromEvent(e: React.PointerEvent<SVGSVGElement>): DrawPoint {
+    const rect = e.currentTarget.getBoundingClientRect()
+    return {
+      x: Math.max(0, Math.min(794, (e.clientX - rect.left) * 794 / rect.width)),
+      y: Math.max(0, Math.min(1123, (e.clientY - rect.top) * 1123 / rect.height))
+    }
+  }
+
+  function startDrawing(e: React.PointerEvent<SVGSVGElement>) {
+    if (!enabled) return
+    e.preventDefault()
+    e.currentTarget.setPointerCapture(e.pointerId)
+    drawing.current = true
+
+    const point = pointFromEvent(e)
+    setDraft({
+      id: nextId.current++,
+      type: tool,
+      points: [point],
+      color,
+      width: 3
+    })
+  }
+
+  function moveDrawing(e: React.PointerEvent<SVGSVGElement>) {
+    if (!drawing.current) return
+    e.preventDefault()
+
+    const point = pointFromEvent(e)
+    setDraft(current => current ? {
+      ...current,
+      points: [...current.points, point]
+    } : null)
+  }
+
+  function finishDrawing() {
+    if (!drawing.current) return
+    drawing.current = false
+
+    setDraft(current => {
+      if (current && current.points.length > 0) {
+        save([...strokes, current])
+      }
+      return null
+    })
+
+    setEnabled(false)
+  }
+
+  function undo() {
+    save(strokes.slice(0, -1))
+  }
+
+  function clearAll() {
+    if (window.confirm('هل تريد مسح جميع الرسومات في هذه الصفحة؟')) {
+      save([])
+      setEditingId(null)
+    }
+  }
+
+  function renderStroke(stroke: DrawStroke) {
+    if (!stroke.points.length) return null
+
+    const first = stroke.points[0]
+    const last = stroke.points[stroke.points.length - 1]
+
+    if (stroke.type === 'arrow') {
+      return (
+        <line
+          key={stroke.id}
+          x1={first.x}
+          y1={first.y}
+          x2={last.x}
+          y2={last.y}
+          stroke={stroke.color}
+          strokeWidth={stroke.width}
+          strokeLinecap="round"
+          markerEnd="url(#dxr-arrow-head)"
+        />
+      )
+    }
+
+    const d = stroke.points.map((point, index) =>
+      `${index === 0 ? 'M' : 'L'} ${point.x} ${point.y}`
+    ).join(' ')
+
+    return (
+      <path
+        key={stroke.id}
+        d={d}
+        fill="none"
+        stroke={stroke.color}
+        strokeWidth={stroke.width}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    )
+  }
+
+  const arrows = strokes.filter(
+    stroke => stroke.type === 'arrow' && stroke.points.length > 0
+  )
+
+  return (
+    <div className={`dxr-drawing-layer ${enabled ? 'drawing-active' : ''}`}>
+      <div className="dxr-draw-controls">
+        <button
+          type="button"
+          className={enabled ? 'draw-on' : ''}
+          onClick={() => {
+            setEditingId(null)
+            setEnabled(!enabled)
+          }}
+          title={enabled ? 'إيقاف الرسم' : 'تشغيل الرسم'}
+        >
+          <Pencil size={17} />
+          {enabled ? 'إنهاء الرسم' : 'الرسم الحر'}
+        </button>
+
+        {enabled && (
+          <>
+            <button
+              type="button"
+              className={tool === 'pen' ? 'draw-on' : ''}
+              onClick={() => setTool('pen')}
+              title="قلم حر"
+            >
+              <Pencil size={17} />
+            </button>
+
+            <button
+              type="button"
+              className={tool === 'arrow' ? 'draw-on' : ''}
+              onClick={() => setTool('arrow')}
+              title="سهم مستقيم"
+            >
+              <ArrowUpRight size={17} />
+            </button>
+
+            <label className="draw-color" title="لون الرسم">
+              <input
+                type="color"
+                value={color}
+                onChange={e => setColor(e.target.value)}
+              />
+            </label>
+
+            <button type="button" onClick={undo} title="تراجع عن آخر رسمة">
+              <Eraser size={17} />
+            </button>
+
+            <button type="button" onClick={clearAll} title="مسح الرسومات">
+              <Trash2 size={17} />
+            </button>
+          </>
+        )}
+      </div>
+
+      {!enabled && arrows.map(arrow => {
+        const tip = arrow.points[arrow.points.length - 1]
+        const note = notes[arrow.id] || ''
+
+        return (
+          <div key={arrow.id}>
+            {editingId === arrow.id ? (
+              <textarea
+                autoFocus
+                className="dxr-arrow-writing"
+                value={note}
+                dir="auto"
+                onChange={e => updateNote(arrow.id, e.target.value)}
+                onFocus={e => {
+                  const length = e.currentTarget.value.length
+                  e.currentTarget.setSelectionRange(length, length)
+                }}
+                onPointerDown={e => e.stopPropagation()}
+                style={{
+                  left: `${tip.x / 794 * 100}%`,
+                  top: `${tip.y / 1123 * 100}%`
+                }}
+              />
+            ) : (
+              <>
+                {note && (
+                  <div
+                    className="dxr-arrow-note"
+                    dir="auto"
+                    style={{
+                      left: `${tip.x / 794 * 100}%`,
+                      top: `${tip.y / 1123 * 100}%`
+                    }}
+                  >
+                    {note}
+                  </div>
+                )}
+
+                <div
+                  className="dxr-arrow-hover"
+                  title="مرّر المؤشر هنا للكتابة"
+                  onMouseEnter={() => setEditingId(arrow.id)}
+                  style={{
+                    left: `${tip.x / 794 * 100}%`,
+                    top: `${tip.y / 1123 * 100}%`
+                  }}
+                />
+              </>
+            )}
+          </div>
+        )
+      })}
+
+      <svg
+        className="dxr-drawing-svg"
+        viewBox="0 0 794 1123"
+        preserveAspectRatio="none"
+        onPointerDown={startDrawing}
+        onPointerMove={moveDrawing}
+        onPointerUp={finishDrawing}
+        onPointerCancel={finishDrawing}
+      >
+        <defs>
+          <marker
+            id="dxr-arrow-head"
+            markerWidth="8"
+            markerHeight="8"
+            refX="6"
+            refY="3"
+            orient="auto"
+          >
+            <path d="M0,0 L0,6 L7,3 z" fill={draft?.color || color} />
+          </marker>
+        </defs>
+
+        {strokes.map(renderStroke)}
+        {draft && renderStroke(draft)}
+      </svg>
+    </div>
+  )
+}
+
+function BookEditor({
+  book,
+  onSave
+}: {
+  book: Book
+  onSave: (content: string) => void
+}) {
+  const [activeTab, setActiveTab] = useState('تحرير')
+  const [pageColor, setPageColor] = useState('white')
+  const [marginSize, setMarginSize] = useState('normal')
+  const [fontSize, setFontSize] = useState('16')
+  const [fontFamily, setFontFamily] = useState('Arial')
+
+  const editor = useEditor({
+    extensions: [
+      StarterKit,
+      Underline,
+      TextStyle,
+      FontFamily,
+      Color,
+      FontSize,
+      Highlight.configure({ multicolor: true }),
+      TextAlign.configure({
+        types: ['heading', 'paragraph']
+      })
+    ],
+
+    content: book.content || '<p></p>',
+
+    editorProps: {
+      attributes: {
+        class: 'tiptap-content',
+        dir: 'rtl',
+        lang: 'ar',
+        spellcheck: 'true'
+      }
+    },
+
+    onUpdate: ({ editor }) => {
+      onSave(editor.getHTML())
+    }
+  })
+
+  if (!editor) {
+    return <div className="editor-loading">جارٍ تجهيز المحرر...</div>
+  }
+
+  const textContent = editor.getText()
+  const wordCount = textContent.trim()
+    ? textContent.trim().split(/\s+/).length
+    : 0
+  const charCount = textContent.length
+
+  const toolIcons: Record<string, LucideIcon> = {
+    'عريض B': Bold,
+    'مائل I': Italic,
+    'تحته خط U': UnderlineIcon,
+    'شطب': Strikethrough,
+    'إزالة التظليل': Highlighter,
+    'عنوان 1': Heading1,
+    'عنوان 2': Heading2,
+    'عنوان 3': Heading3,
+    'فقرة': Pilcrow,
+    'يمين': AlignRight,
+    'وسط': AlignCenter,
+    'يسار': AlignLeft,
+    'تراجع': Undo2,
+    'إعادة': Redo2,
+    'مسح التنسيق': RemoveFormatting,
+    'قائمة نقطية': List,
+    'قائمة مرقمة': ListOrdered,
+    'اقتباس': Quote,
+    'كتلة برمجية': Code2,
+    'فاصل أفقي': Minus
+  }
+
+  const tool = (
+    label: string,
+    active: boolean,
+    action: () => void
+  ) => {
+    const Icon = toolIcons[label]
+    return (
+      <button
+        type="button"
+        className={active ? 'active' : ''}
+        onClick={action}
+        title={label}
+        aria-label={label}
+      >
+        {Icon ? <Icon size={17} strokeWidth={2.1} /> : label}
+      </button>
+    )
+  }
+
+  const applyFontSize = (value: string) => {
+    setFontSize(value)
+    editor.chain().focus()
+      .setMark('textStyle', { fontSize: `${value}px` })
+      .run()
+  }
+
+  const applyFontFamily = (value: string) => {
+    setFontFamily(value)
+    if (value) {
+      editor.chain().focus().setFontFamily(value).run()
+    }
+  }
+
+  return (
+    <div className="writing-workspace">
+
+      <div className="dxr-ribbon">
+
+        <div className="ribbon-tabs">
+          {['تحرير', 'إدراج', 'تخطيط', 'تصميم', 'إحصائيات'].map(tab => (
+            <button
+              type="button"
+              key={tab}
+              className={activeTab === tab ? 'selected' : ''}
+              onClick={() => setActiveTab(tab)}
+            >
+              {tab}
+            </button>
+          ))}
+        </div>
+
+        <div className="ribbon-tools">
+
+          {activeTab === 'تحرير' && (
+            <>
+              <div className="tool-group">
+                <span className="design-label">الخط:</span>
+                <select
+                  value={fontFamily}
+                  onChange={e => applyFontFamily(e.target.value)}
+                  aria-label="نوع الخط"
+                >
+                  <option value="Arial">Arial</option>
+                  <option value="Tahoma">Tahoma</option>
+                  <option value="Georgia">Georgia</option>
+                  <option value="Times New Roman">Times New Roman</option>
+                  <option value="Cairo">Cairo</option>
+                  <option value="Amiri">Amiri</option>
+                  <option value="Noto Naskh Arabic">Noto Naskh Arabic</option>
+                </select>
+
+                <span className="design-label">الحجم:</span>
+                <select
+                  value={fontSize}
+                  onChange={e => applyFontSize(e.target.value)}
+                  aria-label="حجم الخط"
+                >
+                  {['12', '14', '16', '18', '20', '22', '24', '28', '32', '36', '48'].map(size => (
+                    <option key={size} value={size}>{size}</option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="tool-group">
+                {tool('عريض B', editor.isActive('bold'), () =>
+                  editor.chain().focus().toggleBold().run()
+                )}
+                {tool('مائل I', editor.isActive('italic'), () =>
+                  editor.chain().focus().toggleItalic().run()
+                )}
+                {tool('تحته خط U', editor.isActive('underline'), () =>
+                  editor.chain().focus().toggleUnderline().run()
+                )}
+                {tool('شطب', editor.isActive('strike'), () =>
+                  editor.chain().focus().toggleStrike().run()
+                )}
+              </div>
+
+              <div className="tool-group">
+                <label className="color-control">
+                  لون النص
+                  <input
+                    type="color"
+                    defaultValue="#222222"
+                    title="اختر لون النص"
+                    onChange={e =>
+                      editor.chain().focus().setColor(e.target.value).run()
+                    }
+                  />
+                </label>
+
+                <label className="color-control">
+                  تظليل
+                  <input
+                    type="color"
+                    defaultValue="#fff176"
+                    title="اختر لون التظليل"
+                    onChange={e =>
+                      editor.chain().focus()
+                        .setHighlight({ color: e.target.value })
+                        .run()
+                    }
+                  />
+                </label>
+
+                {tool('إزالة التظليل', editor.isActive('highlight'), () =>
+                  editor.chain().focus().unsetHighlight().run()
+                )}
+              </div>
+
+              <div className="tool-group">
+                {tool('عنوان 1', editor.isActive('heading', { level: 1 }), () =>
+                  editor.chain().focus().toggleHeading({ level: 1 }).run()
+                )}
+                {tool('عنوان 2', editor.isActive('heading', { level: 2 }), () =>
+                  editor.chain().focus().toggleHeading({ level: 2 }).run()
+                )}
+                {tool('عنوان 3', editor.isActive('heading', { level: 3 }), () =>
+                  editor.chain().focus().toggleHeading({ level: 3 }).run()
+                )}
+                {tool('فقرة', editor.isActive('paragraph'), () =>
+                  editor.chain().focus().setParagraph().run()
+                )}
+              </div>
+
+              <div className="tool-group">
+                {tool('يمين', false, () =>
+                  editor.chain().focus().setTextAlign('right').run()
+                )}
+                {tool('وسط', false, () =>
+                  editor.chain().focus().setTextAlign('center').run()
+                )}
+                {tool('يسار', false, () =>
+                  editor.chain().focus().setTextAlign('left').run()
+                )}
+              </div>
+
+              <div className="tool-group">
+                {tool('تراجع', false, () =>
+                  editor.chain().focus().undo().run()
+                )}
+                {tool('إعادة', false, () =>
+                  editor.chain().focus().redo().run()
+                )}
+                {tool('مسح التنسيق', false, () =>
+                  editor.chain().focus().unsetAllMarks().clearNodes().run()
+                )}
+              </div>
+            </>
+          )}
+
+          {activeTab === 'إدراج' && (
+            <>
+              <div className="tool-group">
+                {tool('قائمة نقطية', editor.isActive('bulletList'), () =>
+                  editor.chain().focus().toggleBulletList().run()
+                )}
+                {tool('قائمة مرقمة', editor.isActive('orderedList'), () =>
+                  editor.chain().focus().toggleOrderedList().run()
+                )}
+              </div>
+
+              <div className="tool-group">
+                {tool('اقتباس', editor.isActive('blockquote'), () =>
+                  editor.chain().focus().toggleBlockquote().run()
+                )}
+                {tool('كتلة برمجية', editor.isActive('codeBlock'), () =>
+                  editor.chain().focus().toggleCodeBlock().run()
+                )}
+                {tool('فاصل أفقي', false, () =>
+                  editor.chain().focus().setHorizontalRule().run()
+                )}
+              </div>
+            </>
+          )}
+
+          {activeTab === 'تخطيط' && (
+            <div className="tool-group">
+              <span className="design-label">هوامش الصفحة:</span>
+              {tool('عادية', marginSize === 'normal', () =>
+                setMarginSize('normal')
+              )}
+              {tool('ضيقة', marginSize === 'narrow', () =>
+                setMarginSize('narrow')
+              )}
+              {tool('عريضة', marginSize === 'wide', () =>
+                setMarginSize('wide')
+              )}
+            </div>
+          )}
+
+          {activeTab === 'تصميم' && (
+            <div className="tool-group">
+              <span className="design-label">لون الصفحة:</span>
+              {tool('أبيض', pageColor === 'white', () =>
+                setPageColor('white')
+              )}
+              {tool('عاجي', pageColor === 'cream', () =>
+                setPageColor('cream')
+              )}
+              {tool('داكن', pageColor === 'dark', () =>
+                setPageColor('dark')
+              )}
+            </div>
+          )}
+
+          {activeTab === 'إحصائيات' && (
+            <div className="ribbon-information stats-group">
+              <div className="stat-item">
+                <b>عدد الكلمات:</b> {wordCount}
+              </div>
+              <div className="stat-item">
+                <b>عدد الأحرف:</b> {charCount}
+              </div>
+            </div>
+          )}
+
+        </div>
+      </div>
+
+      <div className={`writing-page page-${pageColor} margin-${marginSize}`}>
+        <div className="writing-page-title">{book.title}</div>
+        <EditorContent editor={editor} />
+        <DrawingLayer bookId={book.id} />
+      </div>
+
+      <div className="writing-status">
+        <span>🟢 الحفظ تلقائي</span>
+        <span>معرّف الكتاب: {book.id}</span>
+      </div>
+
+    </div>
+  )
+}
+
+export default function App() {
+  const [page, setPage] = useState<Page>('home')
+  const [books, setBooks] = useState<Book[]>(initialBooks)
+  const [selected, setSelected] = useState<Book | null>(null)
+  const [modal, setModal] = useState('')
+  const [title, setTitle] = useState('')
+  const [bookId, setBookId] = useState('')
+  const [joinPassword, setJoinPassword] = useState('')
+  const [shareCode, setShareCode] = useState('')
+  const [message, setMessage] = useState('')
+
+  const myBooks = books.filter(book => book.owner)
+  const sharedBooks = books.filter(book => !book.owner)
+
+  function saveBooks(data: Book[]) {
+    setBooks(data)
+    localStorage.setItem('dxr-books', JSON.stringify(data))
+  }
+
+  function saveBookContent(bookId: string, content: string) {
+    const updatedBooks = books.map(book =>
+      book.id === bookId
+        ? { ...book, content, updated: new Date().toLocaleDateString('ar-IQ') }
+        : book
+    )
+
+    saveBooks(updatedBooks)
+
+    setSelected(current =>
+      current?.id === bookId
+        ? { ...current, content, updated: new Date().toLocaleDateString('ar-IQ') }
+        : current
+    )
+  }
+
+  function deleteBook(book: Book) {
+    const confirmed = window.confirm(
+      `هل أنت متأكد من حذف الكتاب "${book.title}"؟`
+    )
+
+    if (!confirmed) return
+
+    saveBooks(books.filter(item => item.id !== book.id))
+
+    if (selected?.id === book.id) {
+      setSelected(null)
+      setPage('library')
+    }
+  }
+
+  function createBook() {
+    if (!title.trim()) {
+      setMessage('أدخل اسم الكتاب')
+      return
+    }
+
+    const book: Book = {
+      id: 'DXR-' + Date.now().toString().slice(-9),
+      title: title.trim(),
+      password: '',
+      updated: new Date().toLocaleDateString('ar-IQ'),
+      owner: true
+    }
+
+    saveBooks([book, ...books])
+    setSelected(book)
+    setModal('')
+    setTitle('')
+    setMessage('')
+    setPage('editor')
+  }
+
+  function saveShareCode() {
+    if (!selected) return
+
+    if (shareCode.trim().length < 4) {
+      setMessage('يجب أن يتكون رمز المشاركة من 4 أحرف على الأقل')
+      return
+    }
+
+    const updatedBook = { ...selected, password: shareCode.trim() }
+    const updatedBooks = books.map(book =>
+      book.id === selected.id ? updatedBook : book
+    )
+
+    saveBooks(updatedBooks)
+    setSelected(updatedBook)
+    setShareCode('')
+    setMessage('')
+    setModal('')
+  }
+
+  function joinBook() {
+    if (!bookId.trim() || !joinPassword.trim()) {
+      setMessage('أدخل رقم الكتاب وكلمة المرور')
+      return
+    }
+
+    setMessage(
+      'البحث عن الكتب المشتركة عبر الإنترنت يحتاج إلى ربط قاعدة البيانات السحابية. هذه الميزة لم تُفعّل بعد.'
+    )
+  }
+
+  function openBook(book: Book) {
+    setSelected(book)
+    setPage('editor')
+  }
+
+  function backFromEditor() {
+    setPage(selected?.owner ? 'library' : 'shared')
+  }
+
+  function openCreate() {
+    setMessage('')
+    setTitle('')
+    setModal('create')
+  }
+
+  return (
+    <div className="app">
+
+      <header className="topbar">
+        <div className="brand">
+          <div className="brand-icon">D</div>
+          <div>
+            <h1>DXR <span>BOOKS</span></h1>
+            <small>استوديو تأليف الكتب</small>
+          </div>
+        </div>
+      </header>
+
+      {page === 'home' && (
+        <main className="main dashboard">
+
+          <div className="dashboard-welcome">
+            <span className="section-label">WELCOME TO DXR</span>
+            <h2>مساحة أفكارك تبدأ هنا</h2>
+            <p>أنشئ كتبك، تعاون مع الآخرين، ونظّم أعمالك في مكان واحد.</p>
+          </div>
+
+          <div className="dashboard-sections">
+
+            <button
+              className="dashboard-card"
+              onClick={() => setPage('my-book')}
+            >
+              <div className="dashboard-card-icon red">
+                <BookPlus size={27}/>
+              </div>
+              <div className="dashboard-card-content">
+                <span className="section-label">MY BOOK</span>
+                <h3>كتابي</h3>
+                <p>أنشئ كتاباً جديداً وابدأ رحلة التأليف.</p>
+              </div>
+              <ChevronLeft className="dashboard-arrow"/>
+            </button>
+
+            <button
+              className="dashboard-card"
+              onClick={() => {
+                setMessage('')
+                setPage('shared')
+              }}
+            >
+              <div className="dashboard-card-icon gold">
+                <Users size={27}/>
+              </div>
+              <div className="dashboard-card-content">
+                <span className="section-label">SHARED BOOKS</span>
+                <h3>الكتب المشتركة</h3>
+                <p>ابحث عن كتاب وشارك الآخرين في تأليفه.</p>
+              </div>
+              <ChevronLeft className="dashboard-arrow"/>
+            </button>
+
+            <button
+              className="dashboard-card"
+              onClick={() => setPage('library')}
+            >
+              <div className="dashboard-card-icon red">
+                <Library size={27}/>
+              </div>
+              <div className="dashboard-card-content">
+                <span className="section-label">MY LIBRARY</span>
+                <h3>مكتبي</h3>
+                <p>ارجع إلى كتبك التي أنشأتها وتابع العمل عليها.</p>
+              </div>
+              <ChevronLeft className="dashboard-arrow"/>
+            </button>
+
+          </div>
+
+          <div className="dashboard-summary">
+            <div>
+              <BookOpen size={19}/>
+              <span>كتبي الخاصة</span>
+              <b>{myBooks.length}</b>
+            </div>
+            <div>
+              <Users size={19}/>
+              <span>الكتب المشتركة</span>
+              <b>{sharedBooks.length}</b>
+            </div>
+          </div>
+
+        </main>
+      )}
+
+      {page === 'my-book' && (
+        <main className="main section-page">
+          <button className="back-button" onClick={() => setPage('home')}>
+            <ArrowRight size={18}/>
+            الرئيسية
+          </button>
+
+          <div className="section-page-heading">
+            <div className="dashboard-card-icon red">
+              <BookPlus size={27}/>
+            </div>
+            <span className="section-label">MY BOOK</span>
+            <h2>كتابي</h2>
+            <p>ابدأ مشروعك الجديد وأنشئ كتابك الخاص.</p>
+          </div>
+
+          <div className="feature-panel">
+            <button className="primary-button" onClick={openCreate}>
+              <Plus size={19}/>
+              إنشاء كتاب جديد
+            </button>
+          </div>
+        </main>
+      )}
+
+      {page === 'shared' && (
+        <main className="main section-page">
+          <button className="back-button" onClick={() => setPage('home')}>
+            <ArrowRight size={18}/>
+            الرئيسية
+          </button>
+
+          <div className="section-page-heading">
+            <div className="dashboard-card-icon gold">
+              <Users size={27}/>
+            </div>
+            <span className="section-label">SHARED BOOKS</span>
+            <h2>الكتب المشتركة</h2>
+            <p>ابحث عن كتاب باستخدام رقمه وكلمة المرور.</p>
+          </div>
+
+          <div className="join-panel">
+            <div className="join-panel-title">
+              <Search size={22}/>
+              <h3>البحث عن كتاب</h3>
+            </div>
+
+            <div className="join-fields-row">
+              <div className="join-field">
+                <label>رقم الكتاب</label>
+                <input
+                  value={bookId}
+                  onChange={e => setBookId(e.target.value)}
+                  placeholder="DXR-XXXXXXXXX"
+                />
+              </div>
+
+              <div className="join-field">
+                <label>رمز المشاركة</label>
+                <input
+                  type="password"
+                  value={joinPassword}
+                  onChange={e => setJoinPassword(e.target.value)}
+                  placeholder="رمز المشاركة"
+                />
+              </div>
+            </div>
+
+            {message && <div className="notice">{message}</div>}
+
+            <button className="primary-button full" onClick={joinBook}>
+              <Search size={18}/>
+              البحث والانضمام
+            </button>
+          </div>
+
+          <div className="section-list-heading">
+            <h3>الكتب التي انضممت إليها</h3>
+            <span className="count">{sharedBooks.length} كتاب</span>
+          </div>
+
+          {sharedBooks.length === 0 ? (
+            <div className="empty-state">
+              <Users size={38}/>
+              <h3>لا توجد كتب مشتركة بعد</h3>
+              <p>عندما تنضم إلى كتاب مشترك سيظهر هنا.</p>
+            </div>
+          ) : (
+            <div className="book-list">
+              {sharedBooks.map(book => (
+                <button
+                  className="book-card"
+                  key={book.id}
+                  onClick={() => openBook(book)}
+                >
+                  <div className="book-cover"><BookOpen size={30}/></div>
+                  <div className="book-info">
+                    <b>{book.title}</b>
+                    <small>{book.id}</small>
+                    <span><Clock size={12}/>{book.updated}</span>
+                    <span className="book-role">كتاب مشترك</span>
+                  </div>
+                  <ChevronLeft size={20}/>
+                </button>
+              ))}
+            </div>
+          )}
+        </main>
+      )}
+
+      {page === 'library' && (
+        <main className="main section-page">
+          <button className="back-button" onClick={() => setPage('home')}>
+            <ArrowRight size={18}/>
+            الرئيسية
+          </button>
+
+          <div className="section-page-heading">
+            <div className="dashboard-card-icon red">
+              <Library size={27}/>
+            </div>
+            <span className="section-label">MY LIBRARY</span>
+            <h2>مكتبي</h2>
+            <p>جميع الكتب التي أنشأتها وتملكها.</p>
+          </div>
+
+          <div className="section-list-heading">
+            <h3>كتبي الخاصة</h3>
+            <span className="count">{myBooks.length} كتاب</span>
+          </div>
+
+          {myBooks.length === 0 ? (
+            <div className="empty-state">
+              <FolderOpen size={38}/>
+              <h3>مكتبتك فارغة حالياً</h3>
+              <p>أنشئ كتابك الأول من قسم «كتابي» وسيظهر هنا.</p>
+              <button className="primary-button" onClick={() => setPage('my-book')}>
+                <Plus size={18}/>
+                إنشاء كتاب
+              </button>
+            </div>
+          ) : (
+            <div className="book-list">
+              {myBooks.map(book => (
+                <div className="book-card-row" key={book.id}>
+                  <button
+                    className="book-card"
+                    onClick={() => openBook(book)}
+                  >
+                    <div className="book-cover"><BookOpen size={30}/></div>
+                    <div className="book-info">
+                      <b>{book.title}</b>
+                      <small>{book.id}</small>
+                      <span><Clock size={12}/>{book.updated}</span>
+                      <span className="book-role">مالك الكتاب</span>
+                    </div>
+                    <ChevronLeft size={20}/>
+                  </button>
+
+                  <button
+                    className="delete-book-button"
+                    onClick={() => deleteBook(book)}
+                    aria-label="حذف الكتاب"
+                    title="حذف الكتاب"
+                  >
+                    حذف
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </main>
+      )}
+
+      {page === 'editor' && selected && (
+        <main className="main editor-page">
+          <button className="back-button" onClick={backFromEditor}>
+            <ArrowRight size={18}/>
+            العودة
+          </button>
+
+          <div className="editor-header">
+            <span className="section-label">BOOK WORKSPACE</span>
+            <h2>{selected.title}</h2>
+            <div className="book-id">
+              <LockKeyhole size={14}/>
+              {selected.id}
+            </div>
+          </div>
+
+          <div className="editor-tools">
+            <button onClick={() => document.getElementById("dxr-writing-area")?.focus()}><PenTool/> تحرير النص</button>
+            <button><FileText/> الفصول</button>
+            <button><Users/> المشاركون</button>
+            {selected.owner && (
+              <button onClick={() => {
+                setShareCode('')
+                setMessage('')
+                setModal('share')
+              }}>
+                <LockKeyhole/> إضافة رمز مشاركة
+              </button>
+            )}
+            <button><FileDown/> تصدير PDF</button>
+          </div>
+
+          <BookEditor
+            key={selected.id}
+            book={selected}
+            onSave={(content) => saveBookContent(selected.id, content)}
+          />
+        </main>
+      )}
+
+      {modal === 'create' && (
+        <div className="modal-overlay" onClick={() => setModal('')}>
+          <div className="modal" onClick={e => e.stopPropagation()}>
+            <button className="close-button" onClick={() => setModal('')}>
+              <X size={20}/>
+            </button>
+
+            <div className="modal-icon"><BookPlus/></div>
+            <h2>إنشاء كتاب جديد</h2>
+            <p>ابدأ بتأسيس كتابك الخاص.</p>
+
+            <label>عنوان الكتاب</label>
+            <input
+              value={title}
+              onChange={e => setTitle(e.target.value)}
+              placeholder="اكتب عنوان كتابك"
+            />
+
+            {message && <div className="error">{message}</div>}
+
+            <button className="primary-button full" onClick={createBook}>
+              إنشاء الكتاب
+              <ChevronLeft size={18}/>
+            </button>
+          </div>
+        </div>
+      )}
+
+      {modal === 'share' && (
+        <div className="modal-overlay" onClick={() => setModal('')}>
+          <div className="modal" onClick={e => e.stopPropagation()}>
+            <button className="close-button" onClick={() => setModal('')}>
+              <X size={20}/>
+            </button>
+
+            <div className="modal-icon">
+              <LockKeyhole/>
+            </div>
+            <h2>رمز مشاركة الكتاب</h2>
+            <p>أنشئ رمزاً ليستخدمه الآخرون عند الانضمام إلى كتابك.</p>
+
+            <label>رمز المشاركة</label>
+            <input
+              value={shareCode}
+              onChange={e => setShareCode(e.target.value)}
+              placeholder="أدخل رمزاً من 4 أحرف على الأقل"
+            />
+
+            {message && <div className="error">{message}</div>}
+
+            <button className="primary-button full" onClick={saveShareCode}>
+              حفظ رمز المشاركة
+              <ChevronLeft size={18}/>
+            </button>
+          </div>
+        </div>
+      )}
+
+      <footer>
+        DXR BOOKS <span>•</span> YOUR IDEAS, YOUR BOOKS
+      </footer>
+
+    </div>
+  )
+}
